@@ -1,59 +1,106 @@
 import re
-import tldextract
-from textblob import TextBlob
 import whois
-import requests
+import tldextract
+import nltk
 import spacy
+from textblob import TextBlob
+from datetime import datetime
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+from spacy.cli import download
 
-nlp = spacy.load("en_core_web_sm")
+# Ensure NLTK data is downloaded
+nltk.download('punkt')
+nltk.download('stopwords')
 
-def detect_spam_words(text):
-    spam_keywords = ["urgent", "deposit", "refundable", "click here", "limited time", "account", "verify", "payment", "transfer"]
-    return [word for word in spam_keywords if word.lower() in text.lower()]
+# Ensure spaCy model is loaded
+try:
+    nlp = spacy.load("en_core_web_sm")
+except OSError:
+    download("en_core_web_sm")
+    nlp = spacy.load("en_core_web_sm")
 
-def detect_suspicious_domain(email):
-    ext = tldextract.extract(email)
-    suspicious_tlds = ['xyz', 'top', 'online', 'click', 'work', 'buzz']
-    return ext.suffix if ext.suffix in suspicious_tlds else None
 
-def detect_shortened_urls(text):
-    url_pattern = r'https?://(?:bit\.ly|tinyurl\.com|goo\.gl|ow\.ly|t\.co|rebrand\.ly|is\.gd|shorte\.st|cutt\.ly)/\S+'
-    return re.findall(url_pattern, text)
+# 1. Check for suspicious keywords
+def check_suspicious_keywords(text):
+    keywords = ['deposit', 'payment', 'processing fee', 'urgent', 'refundable', 'security amount']
+    found = [word for word in keywords if word in text.lower()]
+    return found
 
-def grammar_and_spelling_check(text):
-    blob = TextBlob(text)
-    return str(blob.correct())
 
+# 2. Check domain age
 def check_domain_age(email):
-    ext = tldextract.extract(email)
-    domain = ext.domain + '.' + ext.suffix
+    domain = tldextract.extract(email).registered_domain
     try:
         w = whois.whois(domain)
-        return w.creation_date
+        creation_date = w.creation_date
+        if isinstance(creation_date, list):
+            creation_date = creation_date[0]
+        if creation_date:
+            age = (datetime.now() - creation_date).days // 365
+            return age
+        else:
+            return None
     except:
         return None
 
-def check_url_virustotal(url):
-    api_key = '642ab41fa7b1f2a9e2f0794ccd95da0da16b1bfff67d5ccc3b70faff23923c6f_KEY'  # Replace with your VirusTotal API Key
-    params = {'apikey': api_key, 'resource': url}
-    try:
-        response = requests.get('https://www.virustotal.com/vtapi/v2/url/report', params=params)
-        result = response.json()
-        if result.get('positives', 0) > 0:
-            return True
-    except:
-        pass
-    return False
 
-def extract_entities(text):
+# 3. Check suspicious domain extensions
+def check_domain_extension(email):
+    suspicious_ext = ['.online', '.xyz', '.top', '.club', '.site', '.tech']
+    ext = '.' + tldextract.extract(email).suffix
+    return ext in suspicious_ext, ext
+
+
+# 4. Check for spelling/grammar errors
+def check_spelling_grammar(text):
+    blob = TextBlob(text)
+    errors = [word for word in blob.words if word.lower() not in set(stopwords.words('english')) and blob.correct() != blob]
+    return errors
+
+
+# 5. Check for shortened URLs
+def check_shortened_urls(text):
+    pattern = r"(bit\.ly|tinyurl\.com|goo\.gl|t\.co|ow\.ly|buff\.ly)"
+    return re.findall(pattern, text)
+
+
+# 6. Named Entity Recognition (NER) — Detect Company/Org names
+def perform_ner(text):
     doc = nlp(text)
-    return [(ent.text, ent.label_) for ent in doc.ents if ent.label_ == "ORG"]
+    entities = [ent.text for ent in doc.ents if ent.label_ in ['ORG', 'PERSON', 'GPE']]
+    return entities
 
-def detect_salary_outlier(text):
-    matches = re.findall(r'\b\d{5,}\b', text)
-    amounts = [int(num) for num in matches]
-    return [amt for amt in amounts if amt > 1000000]
 
-def detect_suspicious_attachments(text):
-    suspicious_ext = ['.exe', '.zip', '.bat']
-    return [ext for ext in suspicious_ext if ext in text.lower()]
+# Final decision logic
+def final_verdict(results):
+    flags = 0
+
+    if results['suspicious_keywords']:
+        flags += 1
+    if results['domain_age'] is not None and results['domain_age'] < 1:
+        flags += 1
+    if results['suspicious_extension'][0]:
+        flags += 1
+    if results['shortened_urls']:
+        flags += 1
+
+    if flags >= 2:
+        return "Highly Suspicious / Possibly Fake"
+    elif flags == 1:
+        return "Suspicious - Needs Review"
+    else:
+        return "Looks Safe"
+
+
+# Main analysis function
+def analyze_email(sender, content):
+    results = {}
+    results['suspicious_keywords'] = check_suspicious_keywords(content)
+    results['domain_age'] = check_domain_age(sender)
+    results['suspicious_extension'] = check_domain_extension(sender)
+    results['spelling_errors'] = check_spelling_grammar(content)
+    results['shortened_urls'] = check_shortened_urls(content)
+    results['named_entities'] = perform_ner(content)
+    results['final_verdict'] = final_verdict(results)
+    return results
