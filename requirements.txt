@@ -1,0 +1,6 @@
+streamlit
+nltk
+whois
+spacy
+textblob
+tldextract
